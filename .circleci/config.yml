@@ -1,0 +1,97 @@
+version: 2.1
+ 
+orbs:
+  aws-cli: circleci/aws-cli@4.1.3
+
+parameters:
+  STATUS_PERF_DB:
+    type: boolean
+    default: false
+    description: "Checked = Display perf db status"
+
+  STOP_PERF_DB:
+    type: boolean
+    default: false
+    description: "Checked = Stop perf db"
+
+  START_PERF_DB:
+    type: boolean
+    default: false
+    description: "Checked = Start perf db"
+
+  RDSINSTANCE:
+    type: enum
+    default: "sch-lit-ba-mysf002"
+    enum:
+      - "sch-lit-ba-mysf002"
+      - "srm-perf"
+      - "nsgra-perf-80"
+      - "lit-pro-us-perf-80"
+      - "literacy-perf"
+    description: "Choose perf db instance for BAT, SRM, NSGRA, LitPro, SL"
+
+jobs:
+  manage-perf-db:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - aws-cli/setup:
+          profile_name: default
+
+      - run:
+          name: Status perf DB
+          command: |
+            set -e
+
+            STATUS_PERF_DB=<< pipeline.parameters.STATUS_PERF_DB >>
+            STOP_PERF_DB=<< pipeline.parameters.STOP_PERF_DB >>
+            START_PERF_DB=<< pipeline.parameters.START_PERF_DB >>
+            RDSINSTANCE=<< pipeline.parameters.RDSINSTANCE >>
+
+            echo "Starting DB management operation for: ${RDSINSTANCE}"
+
+            if [ "$STATUS_PERF_DB" = "true" ]; then
+              echo "Checking status of RDS instance: ${RDSINSTANCE}"
+              aws rds describe-db-instances --db-instance-identifier ${RDSINSTANCE} | jq --raw-output '.DBInstances | .[].DBInstanceStatus'
+              sleep 10
+
+            elif [ "$STOP_PERF_DB" = "true" ]; then
+              echo "Stopping RDS instance: ${RDSINSTANCE}"
+              current_state="$(aws rds describe-db-instances --db-instance-identifier ${RDSINSTANCE} | jq --raw-output '.DBInstances | .[].DBInstanceStatus')"
+              echo "Current state: $current_state"
+
+              if [ "$current_state" = "available" ]; then
+                aws rds stop-db-instance --db-instance-identifier ${RDSINSTANCE}
+                aws dynamodb put-item --table-name digital-subscriptions-nonprod-us-east-1-state --item '{"LockID": {"S": "'${RDSINSTANCE}'"}, "Digest": {"S": "stop"}}'
+                echo "Waiting for RDS instance to stop..."
+                sleep 180
+                aws rds describe-db-instances --db-instance-identifier ${RDSINSTANCE} | jq --raw-output '.DBInstances | .[].DBInstanceStatus'
+              else
+                echo "RDS DB Instance ${RDSINSTANCE} is already in $current_state"
+              fi
+
+            elif [ "$START_PERF_DB" = "true" ]; then
+              echo "Starting RDS instance: ${RDSINSTANCE}"
+              current_state="$(aws rds describe-db-instances --db-instance-identifier ${RDSINSTANCE} | jq --raw-output '.DBInstances | .[].DBInstanceStatus')"
+              echo "Current state: $current_state"
+
+              if [ "$current_state" = "stopped" ]; then
+                aws rds start-db-instance --db-instance-identifier ${RDSINSTANCE}
+                aws dynamodb delete-item --table-name digital-subscriptions-nonprod-us-east-1-state --key '{"LockID": {"S": "'${RDSINSTANCE}'"}}' || exit 0
+                echo "RDS DB Instance ${RDSINSTANCE} is starting...."
+                sleep 180
+                aws rds describe-db-instances --db-instance-identifier ${RDSINSTANCE} | jq --raw-output '.DBInstances | .[].DBInstanceStatus'
+              else
+                echo "RDS DB Instance ${RDSINSTANCE} is already in $current_state"
+              fi
+
+            else
+              echo "No valid option is selected for the operation"
+              exit 1
+            fi
+
+workflows:
+  manage-db:
+    jobs:
+      - manage-perf-db:
+          context: aws-digital-subs-nonprod  # Create this context in CircleCI with AWS credentials
