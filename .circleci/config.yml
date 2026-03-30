@@ -39,6 +39,16 @@ jobs:
           profile_name: default
 
       - run:
+          name: Debug AWS Connection
+          command: |
+            echo "AWS Region: ${AWS_DEFAULT_REGION}"
+            echo "AWS Account ID:"
+            aws sts get-caller-identity
+            echo ""
+            echo "Testing RDS access:"
+            aws rds describe-db-instances --region us-east-1 --max-items 5 | jq -r '.DBInstances[].DBInstanceIdentifier' || echo "No access to RDS or no instances found"
+
+      - run:
           name: Status perf DB
           command: |
             set -e
